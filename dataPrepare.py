@@ -15,26 +15,38 @@ All rights reserved.
 import glob
 from Preparedata.data import dataPrepare
 from networkTool import CPrintl
+
+# Function to create a sorted list of files matching the pattern in 'dir'
 def makedFile(dir):
     fileList = sorted(glob.glob(dir))
     return fileList
-if __name__=="__main__":
 
-######For MPEG,MVUB######    
-    oriDir = '/8iVFBv2/longdress/Ply/*.ply'
-    outDir = 'Data/Obj/train/'
-    ptNamePrefix = 'MPEG_' # 'MVUB_'
+# Main execution block
+if __name__ == "__main__":
 
-    printl = CPrintl('Preparedata/makedFileObj.log')
-    makeFileList = makedFile(outDir+'*.mat')
-    fileList = sorted(glob.glob(oriDir))
-    for n,file in enumerate(fileList):
-        fileName = file.split('/')[-1][:-4]
-        dataName = outDir+ptNamePrefix+fileName+'.mat'
-        if dataName in makeFileList:   
-            print(dataName,'maked!')
+    ###### For MPEG, MVUB ######
+    oriDir = '/8iVFBv2/longdress/Ply/*.ply'  # Directory containing original .ply point cloud files
+    outDir = 'Data/Obj/train/'              # Directory where .mat files will be saved
+    ptNamePrefix = 'MPEG_'                  # Prefix for naming saved .mat files ('MVUB_' for MVUB dataset)
+
+    printl = CPrintl('Preparedata/makedFileObj.log')  # Logger for recording processed files
+    makeFileList = makedFile(outDir + '*.mat')        # Get list of already processed .mat files
+    fileList = sorted(glob.glob(oriDir))              # List of all .ply files to process
+
+    # Iterate through each .ply file
+    for n, file in enumerate(fileList):
+        fileName = file.split('/')[-1][:-4]                       # Extract file name without extension
+        dataName = outDir + ptNamePrefix + fileName + '.mat'     # Path for saving processed file
+
+        if dataName in makeFileList:       # Skip processing if file already exists
+            print(dataName, 'maked!')
             continue
-        dataPrepare(file,saveMatDir=outDir,ptNamePrefix=ptNamePrefix,offset=0,rotation=False)
-        # please set `rotation=True` in the `dataPrepare` function when processing MVUB data
-        if n%10==0:
+
+        # Process the .ply file and save as .mat
+        dataPrepare(file, saveMatDir=outDir, ptNamePrefix=ptNamePrefix, offset=0, rotation=False)
+
+        # NOTE: Set `rotation=True` in the `dataPrepare` function when processing MVUB data
+
+        # Log progress every 10 files
+        if n % 10 == 0:
             printl(dataName)
