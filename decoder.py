@@ -8,21 +8,23 @@ FilePath: /compression/decoder.py
 All rights reserved.
 '''
 #%%
-import  numpy as np
+import numpy as np
 import torch
 from tqdm import tqdm
 from Octree import DeOctree, dec2bin
-import pt 
+import pt
 from dataset import default_loader as matloader
 from collections import deque
-import os 
+import os
 import time
 from networkTool import *
 from encoderTool import generate_square_subsequent_mask
-from encoder import model,list_orifile
+from encoder import model, list_orifile
 import numpyAc
-batch_size = 1 
+
+batch_size = 1
 bpttRepeatTime = 1
+
 #%%
 '''
 description: decode bin file to occupancy code
@@ -32,100 +34,110 @@ param {model} model
 param {int; Context window length} bptt
 return {N*1,float}occupancy code,time
 '''
-def decodeOct(binfile,oct_data_seq,model,bptt):
-    model.eval()
-    with torch.no_grad():
+def decodeOct(binfile, oct_data_seq, model, bptt):
+    model.eval()  # set model to evaluation mode
+    with torch.no_grad():  # no gradient calculation during inference
         elapsed = time.time()
 
-        KfatherNode = [[255,0,0]]*levelNumK
-        nodeQ = deque()
-        oct_seq = []
-        src_mask = generate_square_subsequent_mask(bptt).to(device)
+        KfatherNode = [[255,0,0]]*levelNumK  # initialize parent node list
+        nodeQ = deque()  # queue for decoding tree nodes
+        oct_seq = []  # stores decoded octree sequence
+        src_mask = generate_square_subsequent_mask(bptt).to(device)  # create attention mask
 
-        input = torch.zeros((bptt,batch_size,levelNumK,3)).long().to(device)
-        padinginbptt = torch.zeros((bptt,batch_size,levelNumK,3)).long().to(device)
-        bpttMovSize = bptt//bpttRepeatTime
-        # input torch.Size([256, 32, 4, 3]) bptt,batch_sz,kparent,[oct,level,octant]
-        # all of [oct,level,octant] default is zero
+        # initialize input tensor for transformer (bptt window)
+        input = torch.zeros((bptt, batch_size, levelNumK, 3)).long().to(device)
+        padinginbptt = torch.zeros((bptt, batch_size, levelNumK, 3)).long().to(device)
+        bpttMovSize = bptt // bpttRepeatTime  # how much we move the bptt window each step
 
-        output = model(input,src_mask,[])
+        # run model once with all zeros to get initial prediction
+        output = model(input, src_mask, [])
 
-        freqsinit = torch.softmax(output[-1],1).squeeze().cpu().detach().numpy()
-        
-        oct_len = len(oct_data_seq)
+        # get softmax probability of last output
+        freqsinit = torch.softmax(output[-1], 1).squeeze().cpu().detach().numpy()
 
-        dec = numpyAc.arithmeticDeCoding(None,oct_len,255,binfile)
+        oct_len = len(oct_data_seq)  # number of nodes to decode
 
-        root =  decodeNode(freqsinit,dec)
+        # decode the bin file using arithmetic decoder
+        dec = numpyAc.arithmeticDeCoding(None, oct_len, 255, binfile)
+
+        # decode the first root node
+        root = decodeNode(freqsinit, dec)
         nodeId = 0
-        
-        KfatherNode = KfatherNode[3:]+[[root,1,1]] + [[root,1,1]] # for padding for first row # ( the parent of root node is root itself)
-        
-        nodeQ.append(KfatherNode) 
-        oct_seq.append(root) #decode the root  
-        
-        with tqdm(total=  oct_len+10) as pbar:
+
+        # pad initial parent node information
+        KfatherNode = KfatherNode[3:] + [[root,1,1]] + [[root,1,1]]
+
+        nodeQ.append(KfatherNode)
+        oct_seq.append(root)  # append root to result
+
+        with tqdm(total=oct_len+10) as pbar:
             while True:
                 father = nodeQ.popleft()
-                childOcu = dec2bin(father[-1][0])
+                childOcu = dec2bin(father[-1][0])  # decode occupancy bits
                 childOcu.reverse()
-                faterLevel = father[-1][1] 
-                for i in range(8):
-                    if(childOcu[i]):
-                        faterFeat = [[father+[[root,faterLevel+1,i+1]]]] # Fill in the information of the node currently decoded [xi-1, xi level, xi octant]
-                        faterFeatTensor = torch.Tensor(faterFeat).long().to(device)
-                        faterFeatTensor[:,:,:,0] -= 1
+                faterLevel = father[-1][1]
 
-                        # shift bptt window
-                        offsetInbpttt = (nodeId)%(bpttMovSize) # the offset of current node in the bppt window
-                        if offsetInbpttt==0: # a new bptt window
-                            input = torch.vstack((input[bpttMovSize:],faterFeatTensor,padinginbptt[0:bpttMovSize-1]))
+                for i in range(8):  # loop through 8 possible child nodes
+                    if(childOcu[i]):
+                        # prepare input for transformer
+                        faterFeat = [[father + [[root, faterLevel+1, i+1]]]]
+                        faterFeatTensor = torch.Tensor(faterFeat).long().to(device)
+                        faterFeatTensor[:,:,:,0] -= 1  # shift octree indices
+
+                        offsetInbpttt = (nodeId) % (bpttMovSize)  # current position in the window
+                        if offsetInbpttt == 0:
+                            # roll the window forward
+                            input = torch.vstack((input[bpttMovSize:], faterFeatTensor, padinginbptt[0:bpttMovSize-1]))
                         else:
                             input[bptt-bpttMovSize+offsetInbpttt] = faterFeatTensor
 
-                        output = model(input,src_mask,[])
-                        
-                        Pro = torch.softmax(output[offsetInbpttt+bptt-bpttMovSize],1).squeeze().cpu().detach().numpy()
+                        # run model and get prediction
+                        output = model(input, src_mask, [])
+                        Pro = torch.softmax(output[offsetInbpttt + bptt - bpttMovSize], 1).squeeze().cpu().detach().numpy()
 
-                        root =  decodeNode(Pro,dec)
+                        root = decodeNode(Pro, dec)
                         nodeId += 1
                         pbar.update(1)
-                        KfatherNode = father[1:]+[[root,faterLevel+1,i+1]]
+
+                        # store new node and continue
+                        KfatherNode = father[1:] + [[root, faterLevel+1, i+1]]
                         nodeQ.append(KfatherNode)
-                        if(root==256 or nodeId==oct_len):
-                            assert len(oct_data_seq) == nodeId # for check oct num
+
+                        if(root == 256 or nodeId == oct_len):
+                            assert len(oct_data_seq) == nodeId  # sanity check
                             Code = oct_seq
-                            return Code,time.time() - elapsed
+                            return Code, time.time() - elapsed
+
                         oct_seq.append(root)
-                    assert oct_data_seq[nodeId] == root # for check
 
-def decodeNode(pro,dec):
-    root = dec.decode(np.expand_dims(pro,0))
-    return root+1
+                    assert oct_data_seq[nodeId] == root  # validate decoding
+
+# helper to decode a node using the arithmetic decoder
+def decodeNode(pro, dec):
+    root = dec.decode(np.expand_dims(pro, 0))
+    return root + 1
 
 
-if __name__=="__main__":
+if __name__ == "__main__":
 
-    for oriFile in list_orifile: # from encoder.py
-        ptName = os.path.basename(oriFile)[:-4]
-        matName = 'Data/testPly/'+ptName+'.mat'
-        binfile = expName+'/data/'+ptName+'.bin'
-        cell,mat =matloader(matName)
+    for oriFile in list_orifile:  # list of original files (from encoder.py)
+        ptName = os.path.basename(oriFile)[:-4]  # get file base name
+        matName = 'Data/testPly/' + ptName + '.mat'  # .mat file path
+        binfile = expName + '/data/' + ptName + '.bin'  # encoded binary file path
+        cell, mat = matloader(matName)  # load .mat file
 
-        # Read Sideinfo
-        oct_data_seq = np.transpose(mat[cell[0,0]]).astype(int)[:,-1:,0]# for check
-        
-        p = np.transpose(mat[cell[1,0]]['Location']) # ori point cloud
-        offset = np.transpose(mat[cell[2,0]]['offset'])
-        qs = mat[cell[2,0]]['qs'][0]
+        # load side information for decoding
+        oct_data_seq = np.transpose(mat[cell[0,0]]).astype(int)[:,-1:,0]  # true occupancy sequence for validation
+        p = np.transpose(mat[cell[1,0]]['Location'])  # original point cloud
+        offset = np.transpose(mat[cell[2,0]]['offset'])  # offset vector
+        qs = mat[cell[2,0]]['qs'][0]  # quantization step size
 
-        Code,elapsed = decodeOct(binfile,oct_data_seq,model,bptt)
-        print('decode succee,time:', elapsed)
-        print('oct len:',len(Code))
+        Code, elapsed = decodeOct(binfile, oct_data_seq, model, bptt)  # perform decoding
+        print('decode success, time:', elapsed)
+        print('oct len:', len(Code))
 
-        # DeOctree
+        # reconstruct point cloud from decoded occupancy code
         ptrec = DeOctree(Code)
-        # Dequantization
-        DQpt = (ptrec*qs+offset)
-        pt.write_ply_data(expName+"/temp/test/rec.ply",DQpt)
-        pt.pcerror(p,DQpt,None,'-r 1',None).wait()
+        DQpt = (ptrec * qs + offset)  # apply dequantization
+        pt.write_ply_data(expName + "/temp/test/rec.ply", DQpt)  # save to .ply
+        pt.pcerror(p, DQpt, None, '-r 1', None).wait()  # evaluate reconstruction accuracy
